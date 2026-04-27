@@ -14,4 +14,9 @@ translation_segments/
 story_generator_ui_config.json
 *api_key*
 obsolete-DNU/
-
+MD plans/
+SQLITE_DESIGN.md
+ARCHITECTURE_REFACTOR_PLAN.md
+PASS2_REALITY_CHECK.md
+*_PLAN*.md
+Gemini_eval.MD
