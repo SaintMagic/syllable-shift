@@ -36,7 +36,7 @@ from translation_profiles import (
     load_translation_profile,
 )
 from translation_validator import ValidationReport, TranslationValidator
-from workflows import LLMRunner, PromptEnhancer
+from workflows import LLMRunner, PromptEnhancer, StoryGenerator
 
 try:
     from openai import OpenAI
@@ -365,132 +365,6 @@ def split_into_word_chunks(text: str, max_words: int) -> list[str]:
     if current:
         chunks.append("\n\n".join(current))
     return chunks
-
-
-class StoryGenerator(LLMRunner):
-    def stream_call(self, client: OpenAI, messages: list[dict[str, str]], output_file: Path, append: bool) -> tuple[str, str | None]:
-        mode = "a" if append else "w"
-        text_parts: list[str] = []
-        output_chars = 0
-        last_progress = 0
-        start_time = time.time()
-        finish_reason = None
-
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        with output_file.open(mode, encoding="utf-8", newline="\n") as out:
-            stream = self.create_stream_with_retries(
-                client,
-                messages,
-                self.config.temperature,
-                self.config.top_p,
-                self.config.max_tokens_per_call,
-            )
-            for chunk in stream:
-                if self.stop_event.is_set():
-                    raise KeyboardInterrupt
-                if not chunk.choices:
-                    continue
-
-                choice = chunk.choices[0]
-                if choice.finish_reason:
-                    finish_reason = choice.finish_reason
-                delta = choice.delta.content or ""
-                if not delta:
-                    continue
-
-                text_parts.append(delta)
-                out.write(delta)
-                out.flush()
-                self.preview(delta)
-
-                output_chars += len(delta)
-                if output_chars - last_progress >= 5000:
-                    last_progress = output_chars
-                    elapsed = time.time() - start_time
-                    self.log(f"Written this call: {output_chars:,} chars ({elapsed / 60:.1f} min)")
-
-        return "".join(text_parts), finish_reason
-
-    def run(self) -> None:
-        output_file = resolve_path(self.config.output_file, "deepseek_original_novella.md")
-        client = self.client()
-
-        self.status("Generating story...")
-        self.log(f"Model: {self.config.model}")
-        self.log(f"Output file: {output_file}")
-        self.log(f"Safe routing: {self.config.safe_routing}")
-
-        story_prompt = (
-            self.config.story_prompt
-            + "\n\nLENGTH OVERRIDE\n"
-            + (
-                f"Target final story length: {self.config.story_target_min_words:,} "
-                f"to {self.config.story_target_max_words:,} words.\n"
-            )
-            + "Do not stop early unless you hit a clean continuation boundary."
-        )
-
-        messages = [
-            {"role": "system", "content": self.config.system_prompt},
-            {"role": "user", "content": story_prompt},
-        ]
-
-        total_start = time.time()
-        append = False
-        for call_number in range(1, self.config.max_continuations + 2):
-            if self.stop_event.is_set():
-                raise KeyboardInterrupt
-
-            self.log(f"Call {call_number}/{self.config.max_continuations + 1}")
-            generated, finish_reason = self.stream_call(client, messages, output_file, append=append)
-            self.log(f"Call {call_number} finish reason: {finish_reason}")
-
-            full_output = output_file.read_text(encoding="utf-8") if output_file.exists() else ""
-            self.log(f"Current output words: {len(full_output.split()):,}")
-
-            needs_continue = self.config.continue_marker in generated or finish_reason == "length"
-            if not needs_continue:
-                break
-
-            output_file.write_text(
-                full_output.replace(self.config.continue_marker, "").rstrip() + "\n",
-                encoding="utf-8",
-                newline="\n",
-            )
-            full_output = output_file.read_text(encoding="utf-8")
-            if call_number > self.config.max_continuations:
-                self.log("Reached maximum continuations. Partial story saved.")
-                break
-
-            messages = [
-                {"role": "system", "content": self.config.continuation_system_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        "Continue the story from the exact point where it stopped.\n"
-                        "Do not restart. Do not summarize. Do not explain.\n"
-                        "Preserve the same second-person present-tense style, tone, continuity, headings, and pacing.\n"
-                        "Continue from the last sentence of the story below.\n"
-                        "If you still cannot finish, stop at a clean section boundary and write exactly:\n"
-                        f"{self.config.continue_marker}\n\n"
-                        "STORY_SO_FAR_START\n"
-                        f"{full_output}\n"
-                        "STORY_SO_FAR_END"
-                    ),
-                },
-            ]
-            append = True
-            with output_file.open("a", encoding="utf-8", newline="\n") as out:
-                out.write("\n\n")
-
-        final_text = output_file.read_text(encoding="utf-8")
-        elapsed = time.time() - total_start
-        self.log("Done.")
-        self.log(f"Saved to: {output_file}")
-        self.log(f"Output words: {len(final_text.split()):,}")
-        self.log(f"Output chars: {len(final_text):,}")
-        self.log(f"Total time: {elapsed / 60:.1f} minutes")
-        self.status("Done")
 
 
 class ChunkedRewriter(LLMRunner):
