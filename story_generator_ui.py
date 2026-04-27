@@ -144,6 +144,31 @@ DEFAULT_STORY_PROMPT = read_python_constant(
 TRANSLATION_SAMPLE_DIR = APP_DIR / "01_test translation" / "translation_stress_test_v9_sanitized_bundle"
 DEFAULT_TRANSLATION_INPUT = TRANSLATION_SAMPLE_DIR / "translation_test_source_segments_v9_sanitized.txt"
 DEFAULT_TRANSLATION_INSTRUCTIONS = TRANSLATION_SAMPLE_DIR / "translation_test_instructions_v9_sanitized.md"
+SAFE_DEFAULT_API_KEY_VALUES = {"", "lm-studio", "ollama", "local"}
+PATH_CONFIG_FIELDS = {
+    "output_file",
+    "history_db_file",
+    "rewrite_input_file",
+    "rewrite_output_file",
+    "rewrite_cleaned_file",
+    "rewrite_chunks_dir",
+    "translation_input_file",
+    "translation_output_file",
+    "translation_segments_dir",
+    "translation_instruction_file",
+    "translation_glossary_file",
+    "translation_dnt_file",
+    "translation_protected_regex_file",
+    "translation_validation_report_file",
+}
+APP_RELATIVE_PATH_ANCHORS = {
+    "01_test translation",
+    "app_data",
+    "output",
+    "outputs",
+    "rewrite_chunks",
+    "translation_segments",
+}
 
 
 @dataclass
@@ -242,6 +267,65 @@ def resolve_optional_path(value: str) -> Path | None:
     return path if path.is_absolute() else APP_DIR / path
 
 
+def sanitize_default_api_key_value(value: Any, provider_preset: str = "", requires_api_key: bool = True) -> str:
+    clean = str(value or "").strip()
+    if clean in SAFE_DEFAULT_API_KEY_VALUES:
+        return clean
+    preset = PROVIDER_PRESETS.get(provider_preset)
+    if preset and not requires_api_key and preset.default_api_key_value in SAFE_DEFAULT_API_KEY_VALUES:
+        return preset.default_api_key_value
+    return ""
+
+
+def app_relative_path_tail(path: Path) -> Path | None:
+    parts = path.parts
+    for index, part in enumerate(parts):
+        if part in APP_RELATIVE_PATH_ANCHORS:
+            return Path(*parts[index:])
+    return None
+
+
+def portable_config_path(value: Any, fallback: Any) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        return clean
+    path = Path(clean)
+    fallback_text = str(fallback or "")
+
+    if not path.is_absolute():
+        return clean
+
+    try:
+        return str(path.relative_to(APP_DIR))
+    except ValueError:
+        pass
+
+    if not path.exists():
+        tail = app_relative_path_tail(path)
+        if tail is not None:
+            return str(tail)
+
+    fallback_path = Path(fallback_text) if fallback_text else None
+    if fallback_path and path.name == fallback_path.name and not path.exists():
+        return fallback_text
+
+    return clean
+
+
+def sanitize_config_data(data: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(data)
+    sanitized["api_key"] = ""
+    sanitized["default_api_key_value"] = sanitize_default_api_key_value(
+        sanitized.get("default_api_key_value", ""),
+        str(sanitized.get("provider_preset", defaults.get("provider_preset", ""))),
+        bool(sanitized.get("requires_api_key", defaults.get("requires_api_key", True))),
+    )
+    for field in PATH_CONFIG_FIELDS:
+        if field in sanitized and field in defaults:
+            sanitized[field] = portable_config_path(sanitized[field], defaults[field])
+    return sanitized
+
+
 def load_saved_config() -> GeneratorConfig:
     if not CONFIG_FILE.exists():
         return GeneratorConfig()
@@ -251,7 +335,8 @@ def load_saved_config() -> GeneratorConfig:
         return GeneratorConfig()
 
     defaults = asdict(GeneratorConfig())
-    defaults.update({key: value for key, value in data.items() if key in defaults})
+    safe_data = sanitize_config_data({key: value for key, value in data.items() if key in defaults}, defaults)
+    defaults.update(safe_data)
     return GeneratorConfig(**defaults)
 
 
@@ -1178,8 +1263,7 @@ class StoryGeneratorApp(tk.Tk):
     def save_settings(self) -> None:
         try:
             config = self.collect_config()
-            data = asdict(config)
-            data["api_key"] = ""
+            data = sanitize_config_data(asdict(config), asdict(GeneratorConfig()))
             CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
             self.status_var.set(f"Settings saved to {CONFIG_FILE.name}")
             self.initialize_history()
