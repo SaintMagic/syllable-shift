@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import importlib.util
 import json
 import math
 import os
 import queue
-import re
 import threading
 import time
 import tkinter as tk
@@ -17,6 +15,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Callable
 
+from legacy_rewrite_adapter import DEFAULT_REWRITE_PROMPT, preclean_text, split_into_word_chunks
 from providers import (
     PROVIDER_PRESETS,
     PROVIDER_TYPES,
@@ -49,7 +48,6 @@ APP_NAME = "Long Document LLM Workstation"
 APP_VERSION = "2.1.0"
 CONFIG_FILE = APP_DIR / "story_generator_ui_config.json"
 ORIGINAL_SCRIPT = APP_DIR / "original story deepseek.py"
-REWRITE_SCRIPT = APP_DIR / "rewrite.py"
 RECHARGE_OVERHEAD = 1.28
 
 FLOAT_FIELDS = {
@@ -150,26 +148,6 @@ DEFAULT_STORY_PROMPT = read_python_constant(
 )
 
 
-def load_rewrite_backend() -> Any | None:
-    if not REWRITE_SCRIPT.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("rewrite_backend", REWRITE_SCRIPT)
-        if spec is None or spec.loader is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    except Exception:
-        return None
-
-
-REWRITE_BACKEND = load_rewrite_backend()
-DEFAULT_REWRITE_PROMPT = getattr(
-    REWRITE_BACKEND,
-    "SYSTEM_PROMPT",
-    "Rewrite the provided story chunk into polished prose while preserving plot, tone, and continuity.",
-)
 TRANSLATION_SAMPLE_DIR = APP_DIR / "01_test translation" / "translation_stress_test_v9_sanitized_bundle"
 DEFAULT_TRANSLATION_INPUT = TRANSLATION_SAMPLE_DIR / "translation_test_source_segments_v9_sanitized.txt"
 DEFAULT_TRANSLATION_INSTRUCTIONS = TRANSLATION_SAMPLE_DIR / "translation_test_instructions_v9_sanitized.md"
@@ -324,47 +302,6 @@ def money(prompt_tokens: int, completion_tokens: int, config: GeneratorConfig) -
         + completion_tokens / 1_000_000 * config.max_completion_price
     )
     return base, base * RECHARGE_OVERHEAD
-
-
-def preclean_text(text: str) -> str:
-    if REWRITE_BACKEND and hasattr(REWRITE_BACKEND, "preclean_text"):
-        return REWRITE_BACKEND.preclean_text(text)
-
-    lines = text.splitlines()
-    garbage_patterns = [
-        r"^\s*DEBUG INFO\s*$",
-        r"^\s*Thought for .* seconds\s*$",
-        r"^\s*continue\s*$",
-        r"^\s*continuing in next response\s*$",
-        r"^\s*\[CONTINUE FROM HERE\]\s*$",
-    ]
-    cleaned = [
-        line for line in lines
-        if not any(re.match(pattern, line, flags=re.IGNORECASE) for pattern in garbage_patterns)
-    ]
-    return re.sub(r"\n{4,}", "\n\n\n", "\n".join(cleaned)).strip() + "\n"
-
-
-def split_into_word_chunks(text: str, max_words: int) -> list[str]:
-    if REWRITE_BACKEND and hasattr(REWRITE_BACKEND, "split_into_word_chunks"):
-        return REWRITE_BACKEND.split_into_word_chunks(text, max_words=max_words)
-
-    paragraphs = text.split("\n\n")
-    chunks: list[str] = []
-    current: list[str] = []
-    current_words = 0
-    for paragraph in paragraphs:
-        words = len(paragraph.split())
-        if current and current_words + words > max_words:
-            chunks.append("\n\n".join(current))
-            current = [paragraph]
-            current_words = words
-        else:
-            current.append(paragraph)
-            current_words += words
-    if current:
-        chunks.append("\n\n".join(current))
-    return chunks
 
 
 class ChunkedRewriter(LLMRunner):
