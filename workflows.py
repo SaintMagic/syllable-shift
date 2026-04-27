@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from legacy_rewrite_adapter import preclean_text, split_into_word_chunks
@@ -16,7 +17,27 @@ from providers import (
     provider_from_config,
     response_to_stream_chunks,
 )
-from workflow_events import CHUNK, ENHANCER_APPEND, ENHANCER_DONE, LOG, PREVIEW, STATUS
+from segmentation import Segment, SegmentParser
+from translation_profiles import (
+    TranslationProfile,
+    load_glossary,
+    load_line_list,
+    load_translation_profile,
+)
+from translation_validator import ValidationReport, TranslationValidator
+from workflow_events import (
+    CHUNK,
+    ENHANCER_APPEND,
+    ENHANCER_DONE,
+    LOG,
+    PREVIEW,
+    SEGMENT,
+    STATUS,
+    TRANSLATION_OUTPUT,
+    TRANSLATION_PREVIEW,
+    TRANSLATION_SOURCE,
+    VALIDATION_REPORT,
+)
 
 try:
     from openai import OpenAI
@@ -29,6 +50,14 @@ APP_DIR = Path(__file__).resolve().parent
 
 def resolve_path(value: str, default_name: str) -> Path:
     path = Path(str(value).strip() or default_name)
+    return path if path.is_absolute() else APP_DIR / path
+
+
+def resolve_optional_path(value: str) -> Path | None:
+    clean = str(value).strip()
+    if not clean:
+        return None
+    path = Path(clean)
     return path if path.is_absolute() else APP_DIR / path
 
 
@@ -451,6 +480,343 @@ class ChunkedRewriter(LLMRunner):
         self.log(f"Output chars: {len(final_text):,}")
         self.log(f"Total time: {elapsed / 60:.1f} minutes")
         self.log(f"Last finish reason: {last_finish}")
+        self.status("Done")
+
+
+class TranslationRunner(LLMRunner):
+    def __init__(self, config: Any, ui_queue: queue.Queue[tuple[str, Any]], stop_event: threading.Event):
+        super().__init__(config, ui_queue, stop_event)
+        self.translation = self.to_translation_config(config)
+
+    def to_translation_config(self, config: Any) -> Any:
+        return SimpleNamespace(
+            input_file=resolve_path(config.translation_input_file, "translation_source.txt"),
+            output_file=resolve_path(config.translation_output_file, "translation_output.md"),
+            segments_dir=resolve_path(config.translation_segments_dir, "translation_segments"),
+            source_language=config.translation_source_language,
+            target_language=config.translation_target_language,
+            register_mode=config.translation_register_mode,
+            instruction_file=resolve_optional_path(config.translation_instruction_file),
+            glossary_file=resolve_optional_path(config.translation_glossary_file),
+            dnt_file=resolve_optional_path(config.translation_dnt_file),
+            protected_regex_file=resolve_optional_path(config.translation_protected_regex_file),
+            segment_delimiter_style=config.translation_segment_delimiter_style,
+            custom_delimiter_regex=config.translation_custom_delimiter_regex,
+            chunk_segments=config.translation_chunk_segments,
+            max_tokens_per_call=config.translation_max_tokens_per_call,
+            temperature=config.translation_temperature,
+            top_p=config.translation_top_p,
+            pause_seconds=config.translation_pause_seconds,
+            validate_after_run=config.translation_validate_after_run,
+            validator_profile=config.translation_validator_profile,
+            validation_report_file=resolve_path(config.translation_validation_report_file, "translation_validation_report.md"),
+            grouped_report=config.translation_grouped_report,
+            save_json_report=config.translation_save_json_report,
+        )
+
+    def load_profile(self) -> tuple[TranslationProfile, list[str], list[str]]:
+        translation = self.translation
+        profile = load_translation_profile(None, translation.validator_profile)
+        if self.config.translation_instruction_text.strip():
+            profile.task_instruction = self.config.translation_instruction_text.strip()
+        elif translation.instruction_file and translation.instruction_file.exists():
+            if translation.instruction_file.suffix.lower() == ".json":
+                profile = load_translation_profile(translation.instruction_file, "")
+            else:
+                profile.task_instruction = translation.instruction_file.read_text(encoding="utf-8", errors="replace")
+
+        profile.source_language = translation.source_language or profile.source_language
+        profile.target_language = translation.target_language or profile.target_language
+        profile.default_register_mode = translation.register_mode or profile.default_register_mode
+        profile.delimiter_style = translation.segment_delimiter_style or profile.delimiter_style
+        profile.delimiter_regex = translation.custom_delimiter_regex or profile.delimiter_regex
+
+        dnt_terms = list(profile.dnt_terms)
+        protected_regexes = list(profile.protected_token_regexes)
+        if translation.dnt_file:
+            dnt_terms.extend(load_line_list(translation.dnt_file))
+        if translation.protected_regex_file:
+            protected_regexes.extend(load_line_list(translation.protected_regex_file))
+        if translation.glossary_file:
+            profile.glossary_terms.extend(load_glossary(translation.glossary_file))
+
+        for term in profile.glossary_terms:
+            if not term.target_term or term.target_term.strip().upper() == "[TARGET TERM]":
+                dnt_terms.append(term.source_term)
+
+        return profile, list(dict.fromkeys(dnt_terms)), list(dict.fromkeys(protected_regexes))
+
+    def parser_for_profile(self, profile: TranslationProfile) -> SegmentParser:
+        return SegmentParser(profile.delimiter_style, profile.delimiter_regex)
+
+    def read_segments(self, require_target: bool = True) -> tuple[list[Segment], TranslationProfile, list[str], list[str], SegmentParser]:
+        translation = self.translation
+        if not translation.input_file.exists():
+            raise FileNotFoundError(f"Translation input file not found: {translation.input_file}")
+        if require_target and not translation.target_language.strip():
+            raise ValueError("Target language is required for translation.")
+
+        profile, dnt_terms, protected_regexes = self.load_profile()
+        parser = self.parser_for_profile(profile)
+        source_text = translation.input_file.read_text(encoding="utf-8", errors="replace")
+        segments = parser.parse(source_text)
+        if not segments:
+            raise ValueError(
+                "No source segments were parsed. Check the segment delimiter style/profile settings."
+            )
+        return segments, profile, dnt_terms, protected_regexes, parser
+
+    def write_manifest(self, segments: list[Segment], profile: TranslationProfile) -> None:
+        translation = self.translation
+        manifest = {
+            "input_file": str(translation.input_file.resolve()),
+            "input_sha256": hashlib.sha256(translation.input_file.read_bytes()).hexdigest(),
+            "output_file": str(translation.output_file.resolve()),
+            "segment_delimiter_style": translation.segment_delimiter_style,
+            "custom_delimiter_regex": translation.custom_delimiter_regex,
+            "chunk_segments": translation.chunk_segments,
+            "segment_count": len(segments),
+            "source_language": translation.source_language,
+            "target_language": translation.target_language,
+            "register_mode": translation.register_mode,
+            "profile": profile.name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        translation.segments_dir.mkdir(parents=True, exist_ok=True)
+        (translation.segments_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    def prepare_segments(self, clear_outputs: bool = True) -> tuple[list[Segment], TranslationProfile, list[str], list[str], SegmentParser]:
+        segments, profile, dnt_terms, protected_regexes, parser = self.read_segments(require_target=clear_outputs)
+        translation = self.translation
+        translation.segments_dir.mkdir(parents=True, exist_ok=True)
+        if clear_outputs:
+            for pattern in ("source_segment_*.txt", "translated_chunk_*.txt"):
+                for old_file in translation.segments_dir.glob(pattern):
+                    old_file.unlink(missing_ok=True)
+            translation.output_file.unlink(missing_ok=True)
+        self.write_manifest(segments, profile)
+        for segment in segments:
+            (translation.segments_dir / f"source_segment_{segment.id}.txt").write_text(
+                parser.render_segment(segment, segment.body),
+                encoding="utf-8",
+                newline="\n",
+            )
+            self.ui_queue.put((
+                SEGMENT,
+                {
+                    "id": segment.id,
+                    "input": segment.word_count,
+                    "output": "",
+                    "ratio": "",
+                    "finish": "",
+                    "status": "Queued",
+                    "validation": "",
+                    "issues": "",
+                },
+            ))
+        self.log(f"Translation input: {translation.input_file}")
+        self.log(f"Segments parsed: {len(segments)}")
+        self.log(f"Target language: {translation.target_language}")
+        self.log(f"Register mode: {translation.register_mode}")
+        self.log(f"Profile: {profile.name}")
+        return segments, profile, dnt_terms, protected_regexes, parser
+
+    def build_translation_messages(
+        self,
+        profile: TranslationProfile,
+        parser: SegmentParser,
+        segment_chunk: list[Segment],
+        chunk_index: int,
+        total_chunks: int,
+        dnt_terms: list[str],
+    ) -> list[dict[str, str]]:
+        translation = self.translation
+        instruction = profile.instruction_text(
+            translation.source_language,
+            translation.target_language,
+            translation.register_mode,
+        )
+        glossary_lines = []
+        for term in profile.glossary_terms:
+            target = term.target_term or "[preserve source term]"
+            context = f" | context: {term.context}" if term.context else ""
+            note = f" | note: {term.note}" if term.note else ""
+            glossary_lines.append(f"- {term.source_term} => {target}{context}{note}")
+        dnt_lines = [f"- {term}" for term in dnt_terms]
+        source_payload = "\n".join(parser.render_segment(segment, segment.body).rstrip() for segment in segment_chunk)
+
+        user_prompt = (
+            f"Translate segment chunk {chunk_index} of {total_chunks}.\n"
+            f"Source language: {translation.source_language}\n"
+            f"Target language: {translation.target_language}\n"
+            f"Register mode: {translation.register_mode}\n\n"
+            "Do not translate delimiter lines. Preserve segment IDs and order exactly.\n"
+            "Return only the translated segment block(s), with the same delimiters.\n\n"
+            "DO_NOT_TRANSLATE_TERMS\n"
+            + ("\n".join(dnt_lines) if dnt_lines else "- None")
+            + "\n\nGLOSSARY\n"
+            + ("\n".join(glossary_lines) if glossary_lines else "- None")
+            + "\n\nSOURCE_SEGMENTS_START\n"
+            + source_payload
+            + "\nSOURCE_SEGMENTS_END"
+        )
+        return [
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": user_prompt},
+        ]
+
+    def translate_chunk(
+        self,
+        client: OpenAI,
+        profile: TranslationProfile,
+        parser: SegmentParser,
+        segment_chunk: list[Segment],
+        chunk_index: int,
+        total_chunks: int,
+        dnt_terms: list[str],
+    ) -> tuple[str, str | None]:
+        translation = self.translation
+        chunk_file = translation.segments_dir / f"translated_chunk_{chunk_index:03}.txt"
+        messages = self.build_translation_messages(profile, parser, segment_chunk, chunk_index, total_chunks, dnt_terms)
+        stream = self.create_stream_with_retries(
+            client,
+            messages,
+            translation.temperature,
+            translation.top_p,
+            translation.max_tokens_per_call,
+        )
+
+        finish_reason = None
+        parts: list[str] = []
+        chunk_file.write_text("", encoding="utf-8")
+        with chunk_file.open("w", encoding="utf-8", newline="\n") as out:
+            for api_chunk in stream:
+                if self.stop_event.is_set():
+                    raise KeyboardInterrupt
+                if not api_chunk.choices:
+                    continue
+                choice = api_chunk.choices[0]
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+                delta = choice.delta.content or ""
+                if not delta:
+                    continue
+                parts.append(delta)
+                out.write(delta)
+                out.flush()
+                self.preview(delta)
+                self.ui_queue.put((TRANSLATION_PREVIEW, delta))
+
+        translated = "".join(parts).strip()
+        chunk_file.write_text(translated + "\n", encoding="utf-8", newline="\n")
+        for segment in segment_chunk:
+            self.ui_queue.put((
+                SEGMENT,
+                {
+                    "id": segment.id,
+                    "output": len(translated.split()),
+                    "finish": finish_reason or "",
+                    "status": "Done",
+                },
+            ))
+        return translated, finish_reason
+
+    def rebuild_output(self, total_chunks: int) -> None:
+        translation = self.translation
+        parts: list[str] = []
+        for index in range(1, total_chunks + 1):
+            chunk_file = translation.segments_dir / f"translated_chunk_{index:03}.txt"
+            if chunk_file.exists():
+                parts.append(chunk_file.read_text(encoding="utf-8", errors="replace").strip())
+        translation.output_file.parent.mkdir(parents=True, exist_ok=True)
+        translation.output_file.write_text("\n\n".join(part for part in parts if part) + "\n", encoding="utf-8", newline="\n")
+
+    def validate_current_output(self) -> ValidationReport:
+        translation = self.translation
+        profile, dnt_terms, protected_regexes = self.load_profile()
+        parser = self.parser_for_profile(profile)
+        validator = TranslationValidator(
+            profile,
+            parser,
+            dnt_terms=dnt_terms,
+            protected_regexes=protected_regexes,
+            grouped_report=translation.grouped_report,
+        )
+        report = validator.validate_files(translation.input_file, translation.output_file)
+        validator.save_report(
+            report,
+            translation.validation_report_file,
+            grouped=translation.grouped_report,
+            save_json=translation.save_json_report,
+        )
+        self.ui_queue.put((VALIDATION_REPORT, report.format(grouped=translation.grouped_report)))
+        self.log(f"Validation report saved to: {translation.validation_report_file}")
+        self.log(f"Validation status: {'PASS' if report.passed else 'FAIL'}")
+        self.log(f"Errors: {report.error_count}; warnings: {report.warning_count}")
+        by_segment: dict[str, dict[str, int]] = {}
+        for issue in report.issues:
+            sid = issue.segment_id or "GLOBAL"
+            bucket = by_segment.setdefault(sid, {"error": 0, "warning": 0})
+            if issue.severity in {"critical", "error"}:
+                bucket["error"] += 1
+            elif issue.severity == "warning":
+                bucket["warning"] += 1
+        for sid, counts in by_segment.items():
+            self.ui_queue.put((
+                SEGMENT,
+                {
+                    "id": sid,
+                    "validation": "FAIL" if counts["error"] else "WARN",
+                    "issues": f"E{counts['error']} W{counts['warning']}",
+                },
+            ))
+        return report
+
+    def preview_segments(self) -> None:
+        segments, profile, _, _, parser = self.prepare_segments(clear_outputs=False)
+        sample = "\n".join(parser.render_segment(segment, segment.body).rstrip() for segment in segments[:5])
+        self.ui_queue.put((TRANSLATION_SOURCE, sample))
+        self.log(f"Previewed {len(segments)} translation segments using profile: {profile.name}")
+        self.status("Translation segments previewed")
+
+    def run(self) -> None:
+        client = self.client()
+        segments, profile, dnt_terms, _, parser = self.prepare_segments(clear_outputs=True)
+        chunks = parser.chunk_segments(segments, self.translation.chunk_segments)
+        self.status("Translating segments...")
+        self.log(f"Model: {self.config.model}")
+        self.log(f"Segment chunks: {len(chunks)}")
+        total_start = time.time()
+        last_finish = None
+
+        for index, segment_chunk in enumerate(chunks, start=1):
+            if self.stop_event.is_set():
+                raise KeyboardInterrupt
+            ids = ", ".join(segment.id for segment in segment_chunk)
+            input_words = sum(segment.word_count for segment in segment_chunk)
+            self.log(f"Translation chunk {index}/{len(chunks)} - segments: {ids}; input words: {input_words:,}")
+            for segment in segment_chunk:
+                self.ui_queue.put((SEGMENT, {"id": segment.id, "status": "Running"}))
+            translated, last_finish = self.translate_chunk(client, profile, parser, segment_chunk, index, len(chunks), dnt_terms)
+            self.rebuild_output(len(chunks))
+            self.log(f"Chunk {index} done - output words: {len(translated.split()):,}, finish: {last_finish}")
+
+            if index != len(chunks) and self.translation.pause_seconds > 0:
+                for _ in range(self.translation.pause_seconds):
+                    if self.stop_event.is_set():
+                        raise KeyboardInterrupt
+                    time.sleep(1)
+
+        output_text = self.translation.output_file.read_text(encoding="utf-8", errors="replace")
+        self.ui_queue.put((TRANSLATION_OUTPUT, output_text))
+        self.log(f"Translation saved to: {self.translation.output_file}")
+        self.log(f"Per-segment files: {self.translation.segments_dir}")
+        self.log(f"Output words: {len(output_text.split()):,}")
+        self.log(f"Total time: {(time.time() - total_start) / 60:.1f} minutes")
+        self.log(f"Last finish reason: {last_finish}")
+
+        if self.translation.validate_after_run:
+            self.validate_current_output()
         self.status("Done")
 
 
