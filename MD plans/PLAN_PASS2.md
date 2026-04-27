@@ -1,0 +1,5 @@
+- left panels still feel tall/dense; collapsible groups would help later
+- some fields are very wide while labels are tiny
+- Prompt Tools right-side layout could use better vertical proportions
+- Model / Provider could maybe have a Provider Status tab instead of only Log
+- top tabs still look a little cramped, but acceptable

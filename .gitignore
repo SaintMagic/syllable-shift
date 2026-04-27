@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.sqlite3
+*.db
+app_data/
+output/
+outputs/
+rewrite_chunks/
+translation_segments/
+*.log
+story_generator_ui_config.json
+*api_key*
+obsolete-DNU/
+
