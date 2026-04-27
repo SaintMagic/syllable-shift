@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import json
 import math
 import os
@@ -10,12 +9,11 @@ import threading
 import time
 import tkinter as tk
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Callable
 
-from legacy_rewrite_adapter import DEFAULT_REWRITE_PROMPT, preclean_text, split_into_word_chunks
+from legacy_rewrite_adapter import DEFAULT_REWRITE_PROMPT, preclean_text
 from providers import (
     PROVIDER_PRESETS,
     PROVIDER_TYPES,
@@ -25,17 +23,12 @@ from providers import (
     test_connection,
 )
 from history_db import HistoryDB, resolve_history_db_path
-from segmentation import Segment, SegmentParser
+from segmentation import SegmentParser
 from translation_profiles import (
-    GlossaryTerm,
-    TranslationProfile,
     builtin_translation_profiles,
-    load_glossary,
-    load_line_list,
     load_translation_profile,
 )
-from translation_validator import ValidationReport, TranslationValidator
-from workflows import ChunkedRewriter, LLMRunner, PromptEnhancer, StoryGenerator, TranslationRunner
+from workflows import ChunkedRewriter, PromptEnhancer, StoryGenerator, TranslationRunner
 
 try:
     from openai import OpenAI
@@ -234,32 +227,6 @@ class GeneratorConfig:
     translation_validation_report_file: str = "translation_validation_report.md"
     translation_grouped_report: bool = True
     translation_save_json_report: bool = False
-
-
-@dataclass
-class TranslationConfig:
-    input_file: Path
-    output_file: Path
-    segments_dir: Path
-    source_language: str
-    target_language: str
-    register_mode: str
-    instruction_file: Path | None
-    glossary_file: Path | None
-    dnt_file: Path | None
-    protected_regex_file: Path | None
-    segment_delimiter_style: str
-    custom_delimiter_regex: str
-    chunk_segments: int
-    max_tokens_per_call: int
-    temperature: float
-    top_p: float
-    pause_seconds: int
-    validate_after_run: bool
-    validator_profile: str
-    validation_report_file: Path
-    grouped_report: bool
-    save_json_report: bool
 
 
 def resolve_path(value: str, default_name: str) -> Path:
