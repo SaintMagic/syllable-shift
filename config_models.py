@@ -144,7 +144,8 @@ def merge_app_project_to_generator(
     values.update(asdict(app_config))
     values.update(asdict(project_config))
     for key in SECRET_FIELDS:
-        values[key] = ""
+        if key in values or (generator_config is not None and hasattr(generator_config, key)):
+            values[key] = ""
     if "default_api_key_value" in values:
         values["default_api_key_value"] = sanitize_default_api_key_value(values["default_api_key_value"])
 
