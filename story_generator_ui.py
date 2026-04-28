@@ -42,6 +42,10 @@ APP_VERSION = "2.1.0"
 CONFIG_FILE = APP_DIR / "story_generator_ui_config.json"
 ORIGINAL_SCRIPT = APP_DIR / "original story deepseek.py"
 RECHARGE_OVERHEAD = 1.28
+SELECTION_BG = "#2f8f83"
+SELECTION_FG = "#ffffff"
+FIELD_BG = "#0f1218"
+FIELD_FG = "#eef2f7"
 
 FLOAT_FIELDS = {
     "max_prompt_price",
@@ -372,6 +376,18 @@ def money(prompt_tokens: int, completion_tokens: int, config: GeneratorConfig) -
     return base, base * RECHARGE_OVERHEAD
 
 
+def friendly_model_list_error(provider: Any, exc: Exception) -> str:
+    detail = str(exc)
+    if getattr(provider, "is_local", False):
+        return (
+            f"Could not list models from {provider.provider_name}. "
+            f"Make sure the local server is running at {provider.base_url}. ({detail})"
+        )
+    if not bool(getattr(provider, "supports_model_listing", True)):
+        return f"{provider.provider_name} does not support model listing."
+    return f"Could not list models from {provider.provider_name}. Check the provider settings and try again. ({detail})"
+
+
 class StoryGeneratorApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -398,6 +414,11 @@ class StoryGeneratorApp(tk.Tk):
         self.api_key_dialog_entry: ttk.Entry | None = None
         self.enter_api_key_button: ttk.Button | None = None
         self.clear_api_key_button: ttk.Button | None = None
+        self.api_key_required_var: tk.StringVar | None = None
+        self.dummy_key_info_var: tk.StringVar | None = None
+        self.dummy_key_info_label: ttk.Label | None = None
+        self.model_combo: ttk.Combobox | None = None
+        self.refresh_models_button: ttk.Button | None = None
 
         self.configure(bg="#10131a")
         self.create_styles()
@@ -414,6 +435,16 @@ class StoryGeneratorApp(tk.Tk):
     def create_styles(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
+        self.option_add("*selectBackground", SELECTION_BG)
+        self.option_add("*selectForeground", SELECTION_FG)
+        self.option_add("*Listbox.background", FIELD_BG)
+        self.option_add("*Listbox.foreground", FIELD_FG)
+        self.option_add("*Listbox.selectBackground", SELECTION_BG)
+        self.option_add("*Listbox.selectForeground", SELECTION_FG)
+        self.option_add("*TCombobox*Listbox.background", FIELD_BG)
+        self.option_add("*TCombobox*Listbox.foreground", FIELD_FG)
+        self.option_add("*TCombobox*Listbox.selectBackground", SELECTION_BG)
+        self.option_add("*TCombobox*Listbox.selectForeground", SELECTION_FG)
         style.configure(".", font=("Segoe UI", 10), background="#10131a", foreground="#eef2f7")
         style.configure("TFrame", background="#10131a")
         style.configure("Panel.TFrame", background="#171b24", relief="flat")
@@ -430,9 +461,31 @@ class StoryGeneratorApp(tk.Tk):
         style.map("Accent.TButton", background=[("active", "#37a091"), ("disabled", "#203a3a")])
         style.configure("Danger.TButton", background="#9a3f48", foreground="#ffffff")
         style.map("Danger.TButton", background=[("active", "#b34b56"), ("disabled", "#33232a")])
-        style.configure("TEntry", fieldbackground="#0f1218", foreground="#eef2f7", insertcolor="#ffffff")
-        style.configure("TCombobox", fieldbackground="#0f1218", foreground="#eef2f7")
-        style.configure("TSpinbox", fieldbackground="#0f1218", foreground="#eef2f7")
+        style.configure("TEntry", fieldbackground=FIELD_BG, foreground=FIELD_FG, insertcolor="#ffffff")
+        style.map(
+            "TEntry",
+            fieldbackground=[("disabled", "#161b24"), ("focus", FIELD_BG), ("!disabled", FIELD_BG)],
+            foreground=[("disabled", "#7f8a99"), ("selected", SELECTION_FG), ("!disabled", FIELD_FG)],
+            selectbackground=[("!disabled", SELECTION_BG)],
+            selectforeground=[("!disabled", SELECTION_FG)],
+        )
+        style.configure("TCombobox", fieldbackground=FIELD_BG, background=FIELD_BG, foreground=FIELD_FG, insertcolor="#ffffff")
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", FIELD_BG), ("focus", FIELD_BG), ("!disabled", FIELD_BG)],
+            background=[("active", "#1b2130"), ("readonly", FIELD_BG), ("!disabled", FIELD_BG)],
+            foreground=[("disabled", "#7f8a99"), ("selected", SELECTION_FG), ("readonly", FIELD_FG), ("!disabled", FIELD_FG)],
+            selectbackground=[("readonly", SELECTION_BG), ("!disabled", SELECTION_BG)],
+            selectforeground=[("readonly", SELECTION_FG), ("!disabled", SELECTION_FG)],
+        )
+        style.configure("TSpinbox", fieldbackground=FIELD_BG, foreground=FIELD_FG, insertcolor="#ffffff")
+        style.map(
+            "TSpinbox",
+            fieldbackground=[("disabled", "#161b24"), ("focus", FIELD_BG), ("!disabled", FIELD_BG)],
+            foreground=[("disabled", "#7f8a99"), ("selected", SELECTION_FG), ("!disabled", FIELD_FG)],
+            selectbackground=[("!disabled", SELECTION_BG)],
+            selectforeground=[("!disabled", SELECTION_FG)],
+        )
         style.configure("TCheckbutton", background="#171b24", foreground="#eef2f7")
         style.configure("TNotebook", background="#10131a", borderwidth=0)
         style.configure("TNotebook.Tab", padding=(12, 8), background="#1b2130", foreground="#c8d2df")
@@ -496,26 +549,33 @@ class StoryGeneratorApp(tk.Tk):
         self.add_combo(general, 1, "Provider type", "provider_type", list(PROVIDER_TYPES), self.update_provider_controls)
         self.add_entry(general, 2, "Provider name", "provider_name")
         self.add_entry(general, 3, "Base URL", "base_url")
-        self.add_entry(general, 4, "Model", "model")
+        self.add_model_selector(general, 4)
         self.add_combo(general, 5, "Model preset", "model_preset", list(MODEL_PRESETS), self.apply_model_preset)
-        self.add_entry(general, 6, "API env var", "api_key_env")
-        self.add_entry(general, 7, "Session API key", "api_key", show="*")
-        self.disable_raw_api_key_entry()
-        ttk.Label(general, text="Use Enter API Key.", style="MutedPanel.TLabel").grid(row=7, column=2, sticky="w", pady=5, padx=(6, 0))
-        self.add_check(general, 8, "Requires API key", "requires_api_key")
-        self.add_entry(general, 9, "Dummy local API key", "default_api_key_value")
+
+        credentials = ttk.LabelFrame(general, text="Credentials", padding=(10, 8))
+        credentials.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 6))
+        credentials.columnconfigure(1, weight=1)
+        self.add_entry(credentials, 0, "API env var", "api_key_env")
+        self.api_key_required_var = tk.StringVar()
+        ttk.Label(credentials, text="API key required", style="Panel.TLabel").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Label(credentials, textvariable=self.api_key_required_var, style="Panel.TLabel").grid(
+            row=1, column=1, columnspan=2, sticky="ew", pady=5, padx=(10, 0)
+        )
+        self.dummy_key_info_var = tk.StringVar()
+        self.dummy_key_info_label = ttk.Label(credentials, textvariable=self.dummy_key_info_var, style="MutedPanel.TLabel")
+        self.dummy_key_info_label.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(10, 0))
         self.api_key_status_var = tk.StringVar()
-        ttk.Label(general, text="Key status", style="Panel.TLabel").grid(row=10, column=0, sticky="w", pady=5)
-        ttk.Label(general, textvariable=self.api_key_status_var, style="Cost.TLabel").grid(
-            row=10, column=1, columnspan=2, sticky="ew", pady=5, padx=(10, 0)
+        ttk.Label(credentials, text="Key status", style="Panel.TLabel").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Label(credentials, textvariable=self.api_key_status_var, style="Cost.TLabel").grid(
+            row=3, column=1, columnspan=2, sticky="ew", pady=5, padx=(10, 0)
         )
         ttk.Label(
-            general,
+            credentials,
             text="Session or environment keys are hidden; local providers may use a harmless dummy value.",
             style="MutedPanel.TLabel",
-        ).grid(row=11, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(10, 0))
-        api_key_buttons = ttk.Frame(general, style="Panel.TFrame")
-        api_key_buttons.grid(row=12, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(10, 0))
+        ).grid(row=4, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(10, 0))
+        api_key_buttons = ttk.Frame(credentials, style="Panel.TFrame")
+        api_key_buttons.grid(row=5, column=1, columnspan=2, sticky="ew", pady=(0, 2), padx=(10, 0))
         api_key_buttons.columnconfigure(0, weight=1)
         api_key_buttons.columnconfigure(1, weight=1)
         self.enter_api_key_button = ttk.Button(api_key_buttons, text="Enter API Key", command=self.open_enter_api_key_dialog)
@@ -526,16 +586,15 @@ class StoryGeneratorApp(tk.Tk):
         self.clear_api_key_button.grid(
             row=0, column=1, sticky="ew", padx=(4, 0)
         )
-        self.add_check(general, 13, "Streaming", "supports_streaming")
-        self.add_check(general, 14, "Structured output", "supports_response_format")
-        self.add_check(general, 15, "JSON schema", "supports_json_schema")
-        self.add_check(general, 16, "Tools", "supports_tools")
-        self.add_check(general, 17, "Reasoning controls", "supports_reasoning_effort")
-        self.add_check(general, 18, "List models", "supports_model_listing")
-        self.add_numeric(general, 19, "Context tokens", "context_window_tokens", 1, 2000000, 1024, is_int=True, use_slider=False)
-        self.add_numeric(general, 20, "Max output tokens", "provider_max_output_tokens", 1, 300000, 1024, is_int=True, use_slider=False)
-        ttk.Button(general, text="Test Connection", command=self.start_provider_test).grid(row=21, column=0, columnspan=3, sticky="ew", pady=(10, 4))
-        ttk.Button(general, text="List Models", command=self.start_model_list).grid(row=22, column=0, columnspan=3, sticky="ew", pady=4)
+        self.add_check(general, 7, "Streaming", "supports_streaming")
+        self.add_check(general, 8, "Structured output", "supports_response_format")
+        self.add_check(general, 9, "JSON schema", "supports_json_schema")
+        self.add_check(general, 10, "Tools", "supports_tools")
+        self.add_check(general, 11, "Reasoning controls", "supports_reasoning_effort")
+        self.add_check(general, 12, "List models", "supports_model_listing")
+        self.add_numeric(general, 13, "Context tokens", "context_window_tokens", 1, 2000000, 1024, is_int=True, use_slider=False)
+        self.add_numeric(general, 14, "Max output tokens", "provider_max_output_tokens", 1, 300000, 1024, is_int=True, use_slider=False)
+        ttk.Button(general, text="Test Connection", command=self.start_provider_test).grid(row=15, column=0, columnspan=3, sticky="ew", pady=(10, 4))
 
         self.add_check(routing, 0, "History enabled", "history_enabled")
         self.add_entry(routing, 1, "History DB", "history_db_file", browse=lambda: self.choose_save_file("history_db_file"))
@@ -766,10 +825,11 @@ class StoryGeneratorApp(tk.Tk):
             wrap="word",
             undo=True,
             height=height,
-            bg="#0f1218",
-            fg="#eef2f7",
+            bg=FIELD_BG,
+            fg=FIELD_FG,
             insertbackground="#ffffff",
-            selectbackground="#2f8f83",
+            selectbackground=SELECTION_BG,
+            selectforeground=SELECTION_FG,
             relief="flat",
             font=(family, size),
         )
@@ -864,6 +924,15 @@ class StoryGeneratorApp(tk.Tk):
             button = ttk.Button(parent, text="...", width=3, command=browse)
             button.grid(row=row, column=2, sticky="e", padx=(6, 0))
             self.field_widgets.setdefault(field, []).append(button)
+
+    def add_model_selector(self, parent: ttk.Frame, row: int) -> None:
+        ttk.Label(parent, text="Model", style="Panel.TLabel").grid(row=row, column=0, sticky="w", pady=5)
+        self.model_combo = ttk.Combobox(parent, textvariable=self.vars["model"], values=[], state="normal")
+        self.model_combo.grid(row=row, column=1, sticky="ew", pady=5, padx=(10, 0))
+        self.field_widgets.setdefault("model", []).append(self.model_combo)
+        # TODO: Add LM Studio model load support later via REST/CLI if a stable local API is available.
+        self.refresh_models_button = ttk.Button(parent, text="Refresh Models", command=self.start_model_list)
+        self.refresh_models_button.grid(row=row, column=2, sticky="e", pady=5, padx=(6, 0))
 
     def add_combo(self, parent: ttk.Frame, row: int, label: str, field: str, values: list[str], callback: Callable[[], None]) -> None:
         ttk.Label(parent, text=label, style="Panel.TLabel").grid(row=row, column=0, sticky="w", pady=5)
@@ -1166,7 +1235,24 @@ class StoryGeneratorApp(tk.Tk):
             status = "No key loaded"
 
         self.api_key_status_var.set(status)
+        self.update_credential_detail_status(default_key, requires_api_key, real_key_relevant)
         self.update_api_key_button_states(api_key, real_key_relevant)
+
+    def update_credential_detail_status(self, default_key: str, requires_api_key: bool, real_key_relevant: bool) -> None:
+        if self.api_key_required_var is not None:
+            self.api_key_required_var.set("Yes" if requires_api_key else "No")
+
+        if self.dummy_key_info_var is None or self.dummy_key_info_label is None:
+            return
+
+        if real_key_relevant:
+            self.dummy_key_info_var.set("")
+            self.dummy_key_info_label.grid_remove()
+            return
+
+        dummy_text = default_key or "local"
+        self.dummy_key_info_var.set(f"Local dummy key: {dummy_text} (no real API key required)")
+        self.dummy_key_info_label.grid()
 
     def update_api_key_button_states(self, api_key: str, real_key_relevant: bool) -> None:
         if self.enter_api_key_button is not None:
@@ -1565,6 +1651,14 @@ class StoryGeneratorApp(tk.Tk):
             self.ui_queue.put(("status", "Provider test passed" if ok else "Provider test failed"))
             if not ok:
                 self.ui_queue.put(("error", text))
+                return
+            if provider.supports_model_listing:
+                try:
+                    names = list_models(OpenAI, provider, min(config.timeout_seconds, 30))
+                    self.ui_queue.put(("models_list", names))
+                    self.ui_queue.put(("log", f"Model list refreshed after connection test: {len(names)} model(s)."))
+                except Exception as exc:
+                    self.ui_queue.put(("log", f"Connected, but model list refresh was unavailable: {friendly_model_list_error(provider, exc)}"))
 
         self.start_worker(run, workflow_type="provider_test", config=config)
 
@@ -1581,12 +1675,29 @@ class StoryGeneratorApp(tk.Tk):
         def run() -> None:
             provider = provider_from_config(config)
             self.ui_queue.put(("log", f"Listing models from: {provider.provider_name} ({provider.base_url})"))
-            names = list_models(OpenAI, provider, min(config.timeout_seconds, 30))
+            try:
+                names = list_models(OpenAI, provider, min(config.timeout_seconds, 30))
+            except Exception as exc:
+                message = friendly_model_list_error(provider, exc)
+                self.ui_queue.put(("log", message))
+                self.ui_queue.put(("status", "Model list unavailable"))
+                return
             self.ui_queue.put(("log", f"Models returned: {len(names)}"))
             self.ui_queue.put(("models_list", names))
-            self.ui_queue.put(("status", "Model list loaded"))
+            self.ui_queue.put(("status", "Model list refreshed"))
 
         self.start_worker(run, workflow_type="model_list", config=config)
+
+    def update_model_dropdown(self, models: list[str]) -> None:
+        clean_models = sorted({str(model).strip() for model in models if str(model).strip()})
+        if not clean_models:
+            self.status_var.set("The provider returned no model IDs")
+            return
+        if self.model_combo is not None:
+            self.model_combo.configure(values=clean_models)
+        if str(self.vars["model"].get()).strip() not in clean_models:
+            # Keep manual model entry possible; selecting from the dropdown is optional.
+            self.status_var.set(f"Model list refreshed: {len(clean_models)} model(s)")
 
     def show_model_picker(self, models: list[str]) -> None:
         if not models:
@@ -1606,9 +1717,10 @@ class StoryGeneratorApp(tk.Tk):
         frame.rowconfigure(0, weight=1)
         listbox = tk.Listbox(
             frame,
-            bg="#0f1218",
-            fg="#eef2f7",
-            selectbackground="#2f8f83",
+            bg=FIELD_BG,
+            fg=FIELD_FG,
+            selectbackground=SELECTION_BG,
+            selectforeground=SELECTION_FG,
             relief="flat",
             font=("Consolas", 10),
         )
@@ -1783,6 +1895,8 @@ class StoryGeneratorApp(tk.Tk):
             self.validation_button.configure(state=state)
         if hasattr(self, "enhance_button"):
             self.enhance_button.configure(state=state)
+        if self.refresh_models_button is not None:
+            self.refresh_models_button.configure(state=state)
         self.stop_button.configure(state="normal" if running else "disabled")
         if running:
             self.progress.start(14)
@@ -1924,7 +2038,7 @@ class StoryGeneratorApp(tk.Tk):
                     self.validation_report_text.insert("1.0", str(payload))
                     self.validation_report_text.see("end")
                 elif kind == "models_list":
-                    self.show_model_picker(list(payload))
+                    self.update_model_dropdown(list(payload))
                 elif kind == "enhancer_append":
                     self.enhancer_output_text.insert("end", str(payload))
                     self.enhancer_output_text.see("end")

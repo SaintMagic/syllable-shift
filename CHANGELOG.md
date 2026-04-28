@@ -8,6 +8,21 @@ This project uses semantic-ish versioning:
 - Minor version: new features that keep existing saved config working.
 - Patch version: fixes, validation tweaks, and small UI improvements.
 
+## [Unreleased]
+
+### Added
+
+- Added extracted workflow runners for clearer story, rewrite, prompt enhancement, translation, and validation execution paths.
+- Added config model skeletons and tests for future app/project config separation.
+- Added session-only API key status, Enter API Key dialog, Clear API Key action, and a compact Credentials section.
+
+### Changed
+
+- Hardened config safety around API keys and portable paths so raw keys are not saved and local paths are normalized more safely.
+- Fixed provider preset binding so built-in presets reliably restore provider defaults.
+- Cleaned up Credentials UI copy and local dummy key status for OpenRouter, LM Studio, Ollama, and custom providers.
+- Improved dark-theme selection contrast for entries, comboboxes, text areas, and dropdown/list selections.
+
 ## [2.1.0] - 2026-04-27
 
 ### Added
