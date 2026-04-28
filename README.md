@@ -49,9 +49,10 @@ For local models, start LM Studio or Ollama first, then select the matching prov
 Run these before making changes:
 
 ```powershell
-python -m py_compile story_generator_ui.py workflows.py workflow_events.py providers.py provider_smoke_tests.py history_db.py history_db_smoke_tests.py segmentation.py translation_profiles.py translation_validator.py rewrite.py "original story deepseek.py"
+python -m py_compile story_generator_ui.py workflows.py workflow_events.py legacy_rewrite_adapter.py config_models.py providers.py provider_smoke_tests.py history_db.py history_db_smoke_tests.py segmentation.py translation_profiles.py translation_validator.py rewrite.py "original story deepseek.py" test_config_models.py
 python provider_smoke_tests.py
 python history_db_smoke_tests.py
+python test_config_models.py
 ```
 
 These checks do not require cloud API calls.
