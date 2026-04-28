@@ -499,7 +499,9 @@ class StoryGeneratorApp(tk.Tk):
         self.add_entry(general, 4, "Model", "model")
         self.add_combo(general, 5, "Model preset", "model_preset", list(MODEL_PRESETS), self.apply_model_preset)
         self.add_entry(general, 6, "API env var", "api_key_env")
-        self.add_entry(general, 7, "API key", "api_key", show="*")
+        self.add_entry(general, 7, "Session API key", "api_key", show="*")
+        self.disable_raw_api_key_entry()
+        ttk.Label(general, text="Use Enter API Key.", style="MutedPanel.TLabel").grid(row=7, column=2, sticky="w", pady=5, padx=(6, 0))
         self.add_check(general, 8, "Requires API key", "requires_api_key")
         self.add_entry(general, 9, "Dummy local API key", "default_api_key_value")
         self.api_key_status_var = tk.StringVar()
@@ -1107,6 +1109,13 @@ class StoryGeneratorApp(tk.Tk):
                 except tk.TclError:
                     pass
 
+    def disable_raw_api_key_entry(self) -> None:
+        for widget in self.field_widgets.get("api_key", []):
+            try:
+                widget.configure(state="disabled")
+            except tk.TclError:
+                pass
+
     def update_provider_controls(self) -> None:
         provider_type = str(self.vars.get("provider_type", tk.StringVar(value="openrouter")).get())
         is_openrouter = provider_type == "openrouter"
@@ -1120,6 +1129,7 @@ class StoryGeneratorApp(tk.Tk):
             ("supports_json_schema",),
             is_custom_preset and bool(self.vars["supports_response_format"].get()),
         )
+        self.disable_raw_api_key_entry()
         self.schedule_cost_update()
         self.update_api_key_status()
 
