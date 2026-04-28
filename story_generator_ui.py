@@ -396,6 +396,8 @@ class StoryGeneratorApp(tk.Tk):
         self.cost_update_job: str | None = None
         self.api_key_dialog: tk.Toplevel | None = None
         self.api_key_dialog_entry: ttk.Entry | None = None
+        self.enter_api_key_button: ttk.Button | None = None
+        self.clear_api_key_button: ttk.Button | None = None
 
         self.configure(bg="#10131a")
         self.create_styles()
@@ -514,10 +516,12 @@ class StoryGeneratorApp(tk.Tk):
         api_key_buttons.grid(row=12, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(10, 0))
         api_key_buttons.columnconfigure(0, weight=1)
         api_key_buttons.columnconfigure(1, weight=1)
-        ttk.Button(api_key_buttons, text="Enter API Key", command=self.open_enter_api_key_dialog).grid(
+        self.enter_api_key_button = ttk.Button(api_key_buttons, text="Enter API Key", command=self.open_enter_api_key_dialog)
+        self.enter_api_key_button.grid(
             row=0, column=0, sticky="ew", padx=(0, 4)
         )
-        ttk.Button(api_key_buttons, text="Clear API Key", command=self.clear_api_key).grid(
+        self.clear_api_key_button = ttk.Button(api_key_buttons, text="Clear API Key", command=self.clear_api_key)
+        self.clear_api_key_button.grid(
             row=0, column=1, sticky="ew", padx=(4, 0)
         )
         self.add_check(general, 13, "Streaming", "supports_streaming")
@@ -1119,6 +1123,16 @@ class StoryGeneratorApp(tk.Tk):
         self.schedule_cost_update()
         self.update_api_key_status()
 
+    def is_real_api_key_relevant(self) -> bool:
+        provider_type = str(self.vars["provider_type"].get())
+        base_url = str(self.vars["base_url"].get()).strip()
+        requires_api_key = bool(self.vars["requires_api_key"].get())
+        is_local = provider_type in {"lm_studio", "ollama"} or (
+            provider_type == "custom_openai_compatible"
+            and base_url.startswith(("http://localhost", "http://127.0.0.1", "http://[::1]"))
+        )
+        return requires_api_key or not is_local
+
     def update_api_key_status(self) -> None:
         if not hasattr(self, "api_key_status_var"):
             return
@@ -1127,24 +1141,28 @@ class StoryGeneratorApp(tk.Tk):
         api_key_env = str(self.vars["api_key_env"].get()).strip()
         default_key = str(self.vars["default_api_key_value"].get()).strip()
         requires_api_key = bool(self.vars["requires_api_key"].get())
-        provider_type = str(self.vars["provider_type"].get())
-        base_url = str(self.vars["base_url"].get()).strip()
         env_key_loaded = bool(api_key_env and os.environ.get(api_key_env))
-        is_local = provider_type in {"lm_studio", "ollama"} or (
-            provider_type == "custom_openai_compatible"
-            and base_url.startswith(("http://localhost", "http://127.0.0.1", "http://[::1]"))
-        )
+        real_key_relevant = self.is_real_api_key_relevant()
 
         if api_key:
             status = "API key field has a session value (hidden)"
         elif env_key_loaded:
             status = f"Env key loaded from {api_key_env}"
-        elif default_key or (is_local and not requires_api_key):
+        elif not real_key_relevant:
+            status = "Dummy local key used / No real API key required"
+        elif default_key and not requires_api_key:
             status = "Dummy local key used"
         else:
             status = "No key loaded"
 
         self.api_key_status_var.set(status)
+        self.update_api_key_button_states(api_key, real_key_relevant)
+
+    def update_api_key_button_states(self, api_key: str, real_key_relevant: bool) -> None:
+        if self.enter_api_key_button is not None:
+            self.enter_api_key_button.configure(state="normal" if real_key_relevant else "disabled")
+        if self.clear_api_key_button is not None:
+            self.clear_api_key_button.configure(state="normal" if api_key else "disabled")
 
     def open_enter_api_key_dialog(self) -> None:
         if self.api_key_dialog is not None and self.api_key_dialog.winfo_exists():
