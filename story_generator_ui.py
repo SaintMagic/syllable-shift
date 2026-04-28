@@ -189,6 +189,14 @@ PROVIDER_PRESET_CONTROLLED_FIELDS = (
     "context_window_tokens",
     "provider_max_output_tokens",
 )
+PROVIDER_CAPABILITY_FIELDS = (
+    ("supports_streaming", "Streaming"),
+    ("supports_response_format", "Structured output"),
+    ("supports_json_schema", "JSON schema"),
+    ("supports_tools", "Tools"),
+    ("supports_reasoning_effort", "Reasoning controls"),
+    ("supports_model_listing", "List models"),
+)
 
 
 @dataclass
@@ -419,6 +427,10 @@ class StoryGeneratorApp(tk.Tk):
         self.dummy_key_info_label: ttk.Label | None = None
         self.model_combo: ttk.Combobox | None = None
         self.refresh_models_button: ttk.Button | None = None
+        self.capability_badge_vars: dict[str, tk.StringVar] = {}
+        self.capability_badge_widgets: dict[str, ttk.Label] = {}
+        self.capability_check_widgets: dict[str, ttk.Checkbutton] = {}
+        self.capability_rows: dict[str, int] = {}
 
         self.configure(bg="#10131a")
         self.create_styles()
@@ -586,15 +598,10 @@ class StoryGeneratorApp(tk.Tk):
         self.clear_api_key_button.grid(
             row=0, column=1, sticky="ew", padx=(4, 0)
         )
-        self.add_check(general, 7, "Streaming", "supports_streaming")
-        self.add_check(general, 8, "Structured output", "supports_response_format")
-        self.add_check(general, 9, "JSON schema", "supports_json_schema")
-        self.add_check(general, 10, "Tools", "supports_tools")
-        self.add_check(general, 11, "Reasoning controls", "supports_reasoning_effort")
-        self.add_check(general, 12, "List models", "supports_model_listing")
-        self.add_numeric(general, 13, "Context tokens", "context_window_tokens", 1, 2000000, 1024, is_int=True, use_slider=False)
-        self.add_numeric(general, 14, "Max output tokens", "provider_max_output_tokens", 1, 300000, 1024, is_int=True, use_slider=False)
-        ttk.Button(general, text="Test Connection", command=self.start_provider_test).grid(row=15, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        self.add_capability_section(general, 7)
+        self.add_numeric(general, 8, "Context tokens", "context_window_tokens", 1, 2000000, 1024, is_int=True, use_slider=False)
+        self.add_numeric(general, 9, "Max output tokens", "provider_max_output_tokens", 1, 300000, 1024, is_int=True, use_slider=False)
+        ttk.Button(general, text="Test Connection", command=self.start_provider_test).grid(row=10, column=0, columnspan=3, sticky="ew", pady=(10, 4))
 
         self.add_check(routing, 0, "History enabled", "history_enabled")
         self.add_entry(routing, 1, "History DB", "history_db_file", browse=lambda: self.choose_save_file("history_db_file"))
@@ -934,6 +941,21 @@ class StoryGeneratorApp(tk.Tk):
         self.refresh_models_button = ttk.Button(parent, text="Refresh Models", command=self.start_model_list)
         self.refresh_models_button.grid(row=row, column=2, sticky="e", pady=5, padx=(6, 0))
 
+    def add_capability_section(self, parent: ttk.Frame, row: int) -> None:
+        frame = ttk.LabelFrame(parent, text="Capabilities", padding=(10, 8))
+        frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 6))
+        frame.columnconfigure(1, weight=1)
+        for index, (field, label) in enumerate(PROVIDER_CAPABILITY_FIELDS):
+            ttk.Label(frame, text=label, style="Panel.TLabel").grid(row=index, column=0, sticky="w", pady=3)
+            badge_var = tk.StringVar()
+            badge = ttk.Label(frame, textvariable=badge_var, style="Cost.TLabel")
+            check = ttk.Checkbutton(frame, variable=self.vars[field])
+            self.capability_badge_vars[field] = badge_var
+            self.capability_badge_widgets[field] = badge
+            self.capability_check_widgets[field] = check
+            self.capability_rows[field] = index
+            self.field_widgets.setdefault(field, []).append(check)
+
     def add_combo(self, parent: ttk.Frame, row: int, label: str, field: str, values: list[str], callback: Callable[[], None]) -> None:
         ttk.Label(parent, text=label, style="Panel.TLabel").grid(row=row, column=0, sticky="w", pady=5)
         combo = ttk.Combobox(parent, textvariable=self.vars[field], values=values, state="readonly")
@@ -1199,8 +1221,28 @@ class StoryGeneratorApp(tk.Tk):
             is_custom_preset and bool(self.vars["supports_response_format"].get()),
         )
         self.disable_raw_api_key_entry()
+        self.update_capability_display()
         self.schedule_cost_update()
         self.update_api_key_status()
+
+    def update_capability_display(self) -> None:
+        is_custom_preset = self.is_custom_provider_preset()
+        for field, _label in PROVIDER_CAPABILITY_FIELDS:
+            badge = self.capability_badge_widgets.get(field)
+            check = self.capability_check_widgets.get(field)
+            if badge is None or check is None:
+                continue
+            row = self.capability_rows.get(field, 0)
+            if is_custom_preset:
+                badge.grid_remove()
+                state = "disabled" if field == "supports_json_schema" and not bool(self.vars["supports_response_format"].get()) else "normal"
+                check.configure(state=state)
+                check.grid(row=row, column=1, sticky="w", pady=3, padx=(10, 0))
+            else:
+                check.grid_remove()
+                supported = bool(self.vars[field].get())
+                self.capability_badge_vars[field].set("Supported" if supported else "Not supported")
+                badge.grid(row=row, column=1, sticky="w", pady=3, padx=(10, 0))
 
     def is_real_api_key_relevant(self) -> bool:
         provider_type = str(self.vars["provider_type"].get())
