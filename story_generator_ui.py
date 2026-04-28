@@ -169,6 +169,22 @@ APP_RELATIVE_PATH_ANCHORS = {
     "rewrite_chunks",
     "translation_segments",
 }
+CUSTOM_PROVIDER_PRESET = "Custom OpenAI-Compatible"
+PROVIDER_PRESET_CONTROLLED_FIELDS = (
+    "provider_type",
+    "provider_name",
+    "base_url",
+    "requires_api_key",
+    "default_api_key_value",
+    "supports_streaming",
+    "supports_response_format",
+    "supports_json_schema",
+    "supports_tools",
+    "supports_reasoning_effort",
+    "supports_model_listing",
+    "context_window_tokens",
+    "provider_max_output_tokens",
+)
 
 
 @dataclass
@@ -1044,6 +1060,9 @@ class StoryGeneratorApp(tk.Tk):
         self.update_provider_controls()
         self.update_cost_estimates()
 
+    def is_custom_provider_preset(self) -> bool:
+        return str(self.vars["provider_preset"].get()) == CUSTOM_PROVIDER_PRESET
+
     def set_field_enabled(self, fields: tuple[str, ...], enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         for field in fields:
@@ -1059,14 +1078,16 @@ class StoryGeneratorApp(tk.Tk):
     def update_provider_controls(self) -> None:
         provider_type = str(self.vars.get("provider_type", tk.StringVar(value="openrouter")).get())
         is_openrouter = provider_type == "openrouter"
+        is_custom_preset = self.is_custom_provider_preset()
+        self.set_field_enabled(PROVIDER_PRESET_CONTROLLED_FIELDS, is_custom_preset)
         self.set_field_enabled(
             ("safe_routing", "provider_sort", "allow_fallbacks", "max_prompt_price", "max_completion_price"),
             is_openrouter,
         )
-        if not bool(self.vars["supports_response_format"].get()):
-            self.set_field_enabled(("supports_json_schema",), False)
-        else:
-            self.set_field_enabled(("supports_json_schema",), True)
+        self.set_field_enabled(
+            ("supports_json_schema",),
+            is_custom_preset and bool(self.vars["supports_response_format"].get()),
+        )
         self.schedule_cost_update()
 
     def initialize_history(self) -> None:
