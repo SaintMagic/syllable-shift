@@ -394,6 +394,8 @@ class StoryGeneratorApp(tk.Tk):
         self.previous_story_prompt: str | None = None
         self.previous_rewrite_prompt: str | None = None
         self.cost_update_job: str | None = None
+        self.api_key_dialog: tk.Toplevel | None = None
+        self.api_key_dialog_entry: ttk.Entry | None = None
 
         self.configure(bg="#10131a")
         self.create_styles()
@@ -416,6 +418,7 @@ class StoryGeneratorApp(tk.Tk):
         style.configure("TLabel", background="#10131a", foreground="#eef2f7")
         style.configure("Muted.TLabel", background="#10131a", foreground="#9ca9b8")
         style.configure("Panel.TLabel", background="#171b24", foreground="#eef2f7")
+        style.configure("MutedPanel.TLabel", background="#171b24", foreground="#9ca9b8")
         style.configure("Header.TLabel", font=("Segoe UI Semibold", 18), background="#10131a", foreground="#ffffff")
         style.configure("Subheader.TLabel", font=("Segoe UI", 10), background="#10131a", foreground="#9ca9b8")
         style.configure("Cost.TLabel", font=("Segoe UI Semibold", 10), background="#171b24", foreground="#cceee8")
@@ -496,17 +499,37 @@ class StoryGeneratorApp(tk.Tk):
         self.add_entry(general, 6, "API env var", "api_key_env")
         self.add_entry(general, 7, "API key", "api_key", show="*")
         self.add_check(general, 8, "Requires API key", "requires_api_key")
-        self.add_entry(general, 9, "Default API key", "default_api_key_value")
-        self.add_check(general, 10, "Streaming", "supports_streaming")
-        self.add_check(general, 11, "Structured output", "supports_response_format")
-        self.add_check(general, 12, "JSON schema", "supports_json_schema")
-        self.add_check(general, 13, "Tools", "supports_tools")
-        self.add_check(general, 14, "Reasoning controls", "supports_reasoning_effort")
-        self.add_check(general, 15, "List models", "supports_model_listing")
-        self.add_numeric(general, 16, "Context tokens", "context_window_tokens", 1, 2000000, 1024, is_int=True, use_slider=False)
-        self.add_numeric(general, 17, "Max output tokens", "provider_max_output_tokens", 1, 300000, 1024, is_int=True, use_slider=False)
-        ttk.Button(general, text="Test Connection", command=self.start_provider_test).grid(row=18, column=0, columnspan=3, sticky="ew", pady=(10, 4))
-        ttk.Button(general, text="List Models", command=self.start_model_list).grid(row=19, column=0, columnspan=3, sticky="ew", pady=4)
+        self.add_entry(general, 9, "Dummy local API key", "default_api_key_value")
+        self.api_key_status_var = tk.StringVar()
+        ttk.Label(general, text="Key status", style="Panel.TLabel").grid(row=10, column=0, sticky="w", pady=5)
+        ttk.Label(general, textvariable=self.api_key_status_var, style="Cost.TLabel").grid(
+            row=10, column=1, columnspan=2, sticky="ew", pady=5, padx=(10, 0)
+        )
+        ttk.Label(
+            general,
+            text="Session or environment keys are hidden; local providers may use a harmless dummy value.",
+            style="MutedPanel.TLabel",
+        ).grid(row=11, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(10, 0))
+        api_key_buttons = ttk.Frame(general, style="Panel.TFrame")
+        api_key_buttons.grid(row=12, column=1, columnspan=2, sticky="ew", pady=(0, 5), padx=(10, 0))
+        api_key_buttons.columnconfigure(0, weight=1)
+        api_key_buttons.columnconfigure(1, weight=1)
+        ttk.Button(api_key_buttons, text="Enter API Key", command=self.open_enter_api_key_dialog).grid(
+            row=0, column=0, sticky="ew", padx=(0, 4)
+        )
+        ttk.Button(api_key_buttons, text="Clear API Key", command=self.clear_api_key).grid(
+            row=0, column=1, sticky="ew", padx=(4, 0)
+        )
+        self.add_check(general, 13, "Streaming", "supports_streaming")
+        self.add_check(general, 14, "Structured output", "supports_response_format")
+        self.add_check(general, 15, "JSON schema", "supports_json_schema")
+        self.add_check(general, 16, "Tools", "supports_tools")
+        self.add_check(general, 17, "Reasoning controls", "supports_reasoning_effort")
+        self.add_check(general, 18, "List models", "supports_model_listing")
+        self.add_numeric(general, 19, "Context tokens", "context_window_tokens", 1, 2000000, 1024, is_int=True, use_slider=False)
+        self.add_numeric(general, 20, "Max output tokens", "provider_max_output_tokens", 1, 300000, 1024, is_int=True, use_slider=False)
+        ttk.Button(general, text="Test Connection", command=self.start_provider_test).grid(row=21, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        ttk.Button(general, text="List Models", command=self.start_model_list).grid(row=22, column=0, columnspan=3, sticky="ew", pady=4)
 
         self.add_check(routing, 0, "History enabled", "history_enabled")
         self.add_entry(routing, 1, "History DB", "history_db_file", browse=lambda: self.choose_save_file("history_db_file"))
@@ -944,6 +967,10 @@ class StoryGeneratorApp(tk.Tk):
             "translation_target_language",
             "translation_segment_delimiter_style",
             "translation_custom_delimiter_regex",
+            "api_key",
+            "api_key_env",
+            "default_api_key_value",
+            "requires_api_key",
         ):
             self.vars[field].trace_add("write", lambda *_args: self.schedule_cost_update())
         for field in ("provider_type", "supports_response_format", "supports_json_schema"):
@@ -956,6 +983,7 @@ class StoryGeneratorApp(tk.Tk):
 
     def run_scheduled_cost_update(self) -> None:
         self.cost_update_job = None
+        self.update_api_key_status()
         self.update_cost_estimates()
 
     def collect_config(self) -> GeneratorConfig:
@@ -1089,6 +1117,104 @@ class StoryGeneratorApp(tk.Tk):
             is_custom_preset and bool(self.vars["supports_response_format"].get()),
         )
         self.schedule_cost_update()
+        self.update_api_key_status()
+
+    def update_api_key_status(self) -> None:
+        if not hasattr(self, "api_key_status_var"):
+            return
+
+        api_key = str(self.vars["api_key"].get()).strip()
+        api_key_env = str(self.vars["api_key_env"].get()).strip()
+        default_key = str(self.vars["default_api_key_value"].get()).strip()
+        requires_api_key = bool(self.vars["requires_api_key"].get())
+        provider_type = str(self.vars["provider_type"].get())
+        base_url = str(self.vars["base_url"].get()).strip()
+        env_key_loaded = bool(api_key_env and os.environ.get(api_key_env))
+        is_local = provider_type in {"lm_studio", "ollama"} or (
+            provider_type == "custom_openai_compatible"
+            and base_url.startswith(("http://localhost", "http://127.0.0.1", "http://[::1]"))
+        )
+
+        if api_key:
+            status = "API key field has a session value (hidden)"
+        elif env_key_loaded:
+            status = f"Env key loaded from {api_key_env}"
+        elif default_key or (is_local and not requires_api_key):
+            status = "Dummy local key used"
+        else:
+            status = "No key loaded"
+
+        self.api_key_status_var.set(status)
+
+    def open_enter_api_key_dialog(self) -> None:
+        if self.api_key_dialog is not None and self.api_key_dialog.winfo_exists():
+            self.api_key_dialog.lift()
+            return
+
+        dialog = tk.Toplevel(self)
+        self.api_key_dialog = dialog
+        dialog.title("Enter API Key")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.configure(bg="#171b24")
+
+        frame = ttk.Frame(dialog, style="Panel.TFrame", padding=16)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            frame,
+            text=(
+                "Paste the API key for this app session.\n\n"
+                "After saving, the key remains hidden. It is kept only in memory while the app is open. "
+                "It is not written to config, logs, or history.\n\n"
+                "To replace it later, click Clear API Key, then Enter API Key again."
+            ),
+            style="Panel.TLabel",
+            wraplength=430,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
+        api_key_value = tk.StringVar()
+        entry = ttk.Entry(frame, textvariable=api_key_value, show="*", width=56)
+        self.api_key_dialog_entry = entry
+        entry.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+
+        buttons = ttk.Frame(frame, style="Panel.TFrame")
+        buttons.grid(row=2, column=0, sticky="ew")
+        buttons.columnconfigure(0, weight=1)
+        buttons.columnconfigure(1, weight=1)
+
+        def close_dialog() -> None:
+            self.api_key_dialog_entry = None
+            self.api_key_dialog = None
+            dialog.destroy()
+
+        def confirm() -> None:
+            key = api_key_value.get().strip()
+            if not key:
+                messagebox.showinfo("API key", "Paste an API key before saving.", parent=dialog)
+                return
+            self.vars["api_key"].set(key)
+            self.update_api_key_status()
+            self.status_var.set("API key loaded for this app session")
+            close_dialog()
+
+        ttk.Button(buttons, text="Cancel", command=close_dialog).grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        ttk.Button(buttons, text="Save Key", style="Accent.TButton", command=confirm).grid(
+            row=0, column=1, sticky="ew", padx=(5, 0)
+        )
+        dialog.bind("<Escape>", lambda _event: close_dialog())
+        dialog.bind("<Return>", lambda _event: confirm())
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        entry.focus_set()
+        self.wait_visibility(dialog)
+
+    def clear_api_key(self) -> None:
+        self.vars["api_key"].set("")
+        self.update_api_key_status()
+        self.status_var.set("Session API key cleared")
 
     def initialize_history(self) -> None:
         self.close_history()
